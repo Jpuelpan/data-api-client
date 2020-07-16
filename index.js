@@ -69,8 +69,8 @@ const parseHydrate = (config,args) =>
   : config.hydrateColumnNames
 
 // Parse the supplied format options, or default to config
-const parseFormatOptions = (config,args) =>
-  typeof args[0].formatOptions === 'object' ? {
+const parseFormatOptions = (config,args) => {
+  let opts = typeof args[0].formatOptions === 'object' ? {
     deserializeDate: typeof args[0].formatOptions.deserializeDate === 'boolean' ? args[0].formatOptions.deserializeDate
     : args[0].formatOptions.deserializeDate ? error('\'formatOptions.deserializeDate\' must be a boolean.')
     : config.formatOptions.deserializeDate,
@@ -80,6 +80,15 @@ const parseFormatOptions = (config,args) =>
   }
   : args[0].formatOptions ? error('\'formatOptions\' must be an object.')
   : config.formatOptions
+
+  opts.nestTables = false
+
+  if( args[1] ){
+    opts = Object.assign(opts, args[1])
+  }
+
+  return opts
+}
 
 // Prepare method params w/ supplied inputs if an object is passed
 const prepareParams = ({ secretArn,resourceArn },args) => {
@@ -257,55 +266,73 @@ const formatResults = (
 // Processes records and either extracts Typed Values into an array, or
 // object with named column labels
 const formatRecords = (recs,columns,hydrate,formatOptions) => {  
-
   // Create map for efficient value parsing
+
   let fmap = recs && recs[0] ? recs[0].map((x,i) => {
     return Object.assign({},
-      columns ? { label: columns[i].label, typeName: columns[i].typeName } : {} ) // add column label and typeName
+      columns ? {
+        tableName: columns[i].tableName,
+        label: columns[i].label,
+        typeName: columns[i].typeName
+      } : {} ) // add column label and typeName
   }) : {}
 
   // Map over all the records (rows)
   return recs ? recs.map(rec => {
-
     // Reduce each field in the record (row)
     return rec.reduce((acc,field,i) => {
+      if( formatOptions.nestTables && !acc[fmap[i].tableName] ){
+        acc[fmap[i].tableName] = {}
+      }
 
       // If the field is null, always return null
       if (field.isNull === true) {
-        return hydrate ? // object if hydrate, else array
-          Object.assign(acc,{ [fmap[i].label]: null })
-          : acc.concat(null)
+        if( formatOptions.nestTables ){
+          acc[fmap[i].tableName] = { ...acc[fmap[i].tableName], [fmap[i].label]: null }
+          return acc
+        }else{
+          return Object.assign(acc, { [fmap[i].label]: null })
+        }
 
       // If the field is mapped, return the mapped field
       } else if (fmap[i] && fmap[i].field) {
-        const value = formatRecordValue(field[fmap[i].field],fmap[i].typeName,formatOptions)
-        return hydrate ? // object if hydrate, else array
-          Object.assign(acc,{ [fmap[i].label]: value })
-          : acc.concat(value)
+        const value = formatRecordValue(field[fmap[i].field], fmap[i].typeName, formatOptions)
+
+        if( formatOptions.nestTables ){
+          acc[fmap[i].tableName] = Object.assign(acc[fmap[i].tableName], { [fmap[i].label]: value })
+        }else{
+          return Object.assign(acc, { [fmap[i].label]: value })
+        }
+
+        return acc
 
       // Else discover the field type
       } else {
-
-        // Look for non-null fields
         Object.keys(field).map(type => {
           if (type !== 'isNull' && field[type] !== null) {
             fmap[i]['field'] = type
           }
         })
 
-        // Return the mapped field (this should NEVER be null)
-        const value = formatRecordValue(field[fmap[i].field],fmap[i].typeName,formatOptions)
-        return hydrate ? // object if hydrate, else array
-          Object.assign(acc,{ [fmap[i].label]: value })
-          : acc.concat(value)
-      }
+        const value = formatRecordValue(field[fmap[i].field], fmap[i].typeName, formatOptions)
 
-    }, hydrate ? {} : []) // init object if hydrate, else init array
+        if( formatOptions.nestTables ){
+          acc[fmap[i].tableName] = { ...acc[fmap[i].tableName], [fmap[i].label]: value }
+
+          return acc
+        }else{
+          return Object.assign(acc, { [fmap[i].label]: value })
+        }
+
+        return acc
+
+      }
+    }, {}) // init object if hydrate, else init array
   }) : [] // empty record set returns an array
 } // end formatRecords
 
 // Format record value based on its value, the database column's typeName and the formatting options
-const formatRecordValue = (value,typeName,formatOptions) => formatOptions && formatOptions.deserializeDate &&
+const formatRecordValue = (value, typeName, formatOptions) => formatOptions && formatOptions.deserializeDate &&
   ['DATE', 'DATETIME', 'TIMESTAMP', 'TIMESTAMP WITH TIME ZONE'].includes(typeName) 
   ? formatFromTimeStamp(value,(formatOptions && formatOptions.treatAsLocalDate) || typeName === 'TIMESTAMP WITH TIME ZONE') 
   : value
@@ -329,7 +356,6 @@ const mergeConfig = (initialConfig,args) =>
 
 // Query function (use standard form for `this` context)
 const query = async function(config,..._args) {
-
   // Flatten array if nested arrays (fixes #30)
   const args = Array.isArray(_args[0]) ? flatten(_args) : _args
 
@@ -375,7 +401,6 @@ const query = async function(config,..._args) {
     // Capture the result for debugging
     let result = await (isBatch ? config.RDS.batchExecuteStatement(params).promise()
       : config.RDS.executeStatement(params).promise())
-
     // Format and return the results
     return formatResults(
       result,
